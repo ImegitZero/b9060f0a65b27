@@ -21,44 +21,70 @@ class BoardRecognizer(private val prefs: SharedPreferences) {
     init { load() }
     val learned get() = pieces.all { tpl[it]?.isNotEmpty() == true }
 
-    private fun save() = prefs.edit().putString("t", tpl.entries.joinToString("\n") { e ->
+    private fun save() = prefs.edit().putString("t2", tpl.entries.joinToString("\n") { e ->
         e.value.joinToString("\n") { "${e.key}:${it.joinToString(",")}" } }).apply()
 
     private fun load() {
-        prefs.getString("t", null)?.lines()?.forEach { l ->
+        prefs.getString("t2", null)?.lines()?.forEach { l ->
             if (l.length > 2) tpl.getOrPut(l[0]) { ArrayList() }.add(l.substring(2).split(",").map { it.toInt() }.toIntArray())
         }
     }
 
-    private fun near(c: Int, r: Int, g: Int, b: Int) =
-        abs(Color.red(c) - r) < 14 && abs(Color.green(c) - g) < 14 && abs(Color.blue(c) - b) < 14
-
-    fun locate(b: Bitmap): Rect? {
-        val w = b.width; val h = b.height; val px = IntArray(w)
-        var x0 = w; var y0 = h; var x1 = -1; var y1 = -1
-        for (y in 0 until h step 2) {
-            b.getPixels(px, 0, w, 0, y, w, 1)
-            for (x in 0 until w step 2) {
-                val c = px[x]
-                if (near(c, 238, 238, 210) || near(c, 118, 150, 86)) {
-                    if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y
-                }
-            }
-        }
-        val bw = x1 - x0 + 1; val bh = y1 - y0 + 1
-        if (bw < w / 2 || abs(bw - bh) > bw / 8) return null
-        val s = (bw + bh) / 2
-        if (x0 + s > w || y0 + s > h) return null
-        return Rect(x0, y0, x0 + s, y0 + s).also { board = it }
+    private fun isBoardColor(c: Int): Boolean {
+        val r = Color.red(c); val g = Color.green(c); val b = Color.blue(c)
+        return (abs(r - 238) < 6 && abs(g - 238) < 6 && abs(b - 210) < 6) ||
+               (abs(r - 118) < 6 && abs(g - 150) < 6 && abs(b - 86) < 6)
     }
 
+    /** Самая длинная полоса true, допускающая разрывы до gap (швы между клетками). */
+    private fun longest(ok: BooleanArray, gap: Int): IntArray? {
+        var bs = -1; var be = -1; var bl = -1; var s = -1; var p = -1
+        for (i in ok.indices) if (ok[i]) {
+            if (s < 0) s = i
+            else if (i - p > gap + 1) { if (p - s > bl) { bs = s; be = p; bl = p - s }; s = i }
+            p = i
+        }
+        if (s >= 0 && p - s > bl) { bs = s; be = p }
+        return if (bs < 0) null else intArrayOf(bs, be)
+    }
+
+    /** Ищем доску по плотности «шахматных» цветов, поэтому лицо бота, логотип и т.п. не мешают. */
+    fun locate(b: Bitmap): Rect? {
+        val w = b.width; val h = b.height; val px = IntArray(w)
+        val rc = IntArray(h); var mx = 0
+        for (y in 0 until h) {
+            b.getPixels(px, 0, w, 0, y, w, 1)
+            var n = 0; var x = 0
+            while (x < w) { if (isBoardColor(px[x])) n++; x += 2 }
+            rc[y] = n; if (n > mx) mx = n
+        }
+        if (mx < w / 8) return null
+        val ys = longest(BooleanArray(h) { rc[it] >= mx / 4 }, 4) ?: return null
+        val cc = IntArray(w)
+        for (y in ys[0]..ys[1]) {
+            b.getPixels(px, 0, w, 0, y, w, 1)
+            for (x in 0 until w) if (isBoardColor(px[x])) cc[x]++
+        }
+        val th = (ys[1] - ys[0] + 1) / 4
+        val xs = longest(BooleanArray(w) { cc[it] >= th }, 4) ?: return null
+        val bw = xs[1] - xs[0] + 1; val bh = ys[1] - ys[0] + 1
+        if (bw < w / 3 || abs(bw - bh) > bw / 16) return null
+        val s = minOf((bw + bh) / 2, w - xs[0], h - ys[0])
+        return Rect(xs[0], ys[0], xs[0] + s, ys[0] + s).also { board = it }
+    }
+
+    /** Сигнатура клетки: края обрезаны (устойчиво к сдвигу сетки на пару пикселей), фон вычтен. */
     private fun sig(b: Bitmap, r: Rect, row: Int, col: Int): IntArray {
-        val s = r.width() / 8
-        val cell = Bitmap.createBitmap(b, r.left + col * s, r.top + row * s, s, s)
-        val sm = Bitmap.createScaledBitmap(cell, N, N, true)
-        fun lum(x: Int, y: Int): Int { val c = sm.getPixel(x, y); return (Color.red(c) * 3 + Color.green(c) * 6 + Color.blue(c)) / 10 }
-        val k = intArrayOf(lum(1, 1), lum(N - 2, 1), lum(1, N - 2), lum(N - 2, N - 2)).sorted()
-        val bg = (k[1] + k[2]) / 2
+        val s = r.width() / 8f
+        val ins = (s * 0.075f).toInt()
+        val x = (r.left + col * s).toInt() + ins; val y = (r.top + row * s).toInt() + ins
+        val sz = minOf(s.toInt() - 2 * ins, b.width - x, b.height - y)
+        if (sz < 8) return blank
+        val sm = Bitmap.createScaledBitmap(Bitmap.createBitmap(b, x, y, sz, sz), N, N, true)
+        fun lum(px: Int, py: Int): Int { val c = sm.getPixel(px, py); return (Color.red(c) * 3 + Color.green(c) * 6 + Color.blue(c)) / 10 }
+        val k = intArrayOf(lum(1, 1), lum(N - 2, 1), lum(1, N - 2), lum(N - 2, N - 2),
+            lum(1, N / 2), lum(N / 2, 1), lum(N - 2, N / 2)).sorted()
+        val bg = k[3]
         return IntArray(N * N) { val v = lum(it % N, it / N); if (abs(v - bg) < 10) 128 else v }
     }
 
