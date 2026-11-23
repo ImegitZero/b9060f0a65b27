@@ -95,7 +95,8 @@ class BoardRecognizer(private val prefs: SharedPreferences) {
         val sz = minOf(s.toInt() - 2 * ins, b.width - x, b.height - y)
         if (sz < 8) return blank
         val sm = Bitmap.createScaledBitmap(Bitmap.createBitmap(b, x, y, sz, sz), N, N, true)
-        fun lum(px: Int, py: Int): Int { val c = sm.getPixel(px, py); return (Color.red(c) * 3 + Color.green(c) * 6 + Color.blue(c)) / 10 }
+        val pix = IntArray(N * N); sm.getPixels(pix, 0, N, 0, 0, N, N)
+        fun lum(px: Int, py: Int): Int { val c = pix[py * N + px]; return (Color.red(c) * 3 + Color.green(c) * 6 + Color.blue(c)) / 10 }
         val k = intArrayOf(lum(1, 1), lum(N - 2, 1), lum(1, N - 2), lum(N - 2, N - 2),
             lum(1, N / 2), lum(N / 2, 1), lum(N - 2, N / 2)).sorted()
         val bg = k[3]
@@ -140,6 +141,16 @@ class BoardRecognizer(private val prefs: SharedPreferences) {
     fun grid(b: Bitmap, flipped: Boolean): Array<CharArray>? {
         if (!learned) return null
         val r = boardFor(b) ?: return null
+        return read(b, r, flipped)
+    }
+
+    /** Быстрый путь: доска уже найдена, b — полоса экрана с доской, r — её положение внутри b. */
+    fun gridAt(b: Bitmap, r: Rect, flipped: Boolean): Array<CharArray>? {
+        if (!learned || !stillThere(b, r)) return null
+        return read(b, r, flipped)
+    }
+
+    private fun read(b: Bitmap, r: Rect, flipped: Boolean): Array<CharArray>? {
         val g = Array(8) { CharArray(8) { '.' } }
         for (row in 0..7) for (col in 0..7) {
             val (f, rk) = fr(row, col, flipped)

@@ -27,6 +27,10 @@ class ArrowView(c: Context) : View(c) {
     private var badge: Badge? = null
     private var win = -1f   // доля белых в оценке, 0..100; <0 — не показывать
 
+    var showArrow = true
+    var showSquares = true
+    var showBar = true
+
     val hasContent get() = move != null || badge != null
 
     fun clear() { move = null; badge = null; win = -1f; invalidate() }
@@ -55,7 +59,7 @@ class ArrowView(c: Context) : View(c) {
         c.translate(-loc[0].toFloat(), -loc[1].toFloat())
 
         // полоса оценки над доской: белая часть — преимущество белых
-        if (win >= 0f) {
+        if (win >= 0f && showBar) {
             val h = cell * 0.075f; val top = r.top - h - cell * 0.07f
             val l = r.left + cell * 0.12f; val w = r.width() - cell * 0.24f
             bar.color = 0xFF111111.toInt(); c.drawRoundRect(RectF(l - 3, top - 3, l + w + 3, top + h + 3), h, h, bar)
@@ -65,8 +69,11 @@ class ArrowView(c: Context) : View(c) {
         move?.let { mv ->
             val a = ctr(mv.substring(0, 2)); val b = ctr(mv.substring(2, 4))
             val h = cell / 2
-            sq.color = 0x552E7DFF.toInt(); c.drawRect(a.x - h, a.y - h, a.x + h, a.y + h, sq)
-            sq.color = 0x882E7DFF.toInt(); c.drawRect(b.x - h, b.y - h, b.x + h, b.y + h, sq)
+            if (showSquares) {
+                sq.color = 0x552E7DFF.toInt(); c.drawRect(a.x - h, a.y - h, a.x + h, a.y + h, sq)
+                sq.color = 0x882E7DFF.toInt(); c.drawRect(b.x - h, b.y - h, b.x + h, b.y + h, sq)
+            }
+            if (!showArrow) return@let
             // конь ходит буквой «Г»: сначала по длинной стороне, потом поворот
             val pts = if (knight) listOf(a, if (abs(b.x - a.x) > abs(b.y - a.y)) PointF(b.x, a.y) else PointF(a.x, b.y), b)
                       else listOf(a, b)
