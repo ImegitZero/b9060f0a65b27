@@ -18,7 +18,10 @@ class Stockfish(ctx: Context) {
         send("isready"); waitFor("readyok")
     }
 
-    private fun send(s: String) = synchronized(w) { w.write(s + "\n"); w.flush() }
+    private fun send(s: String) = synchronized(w) {
+        if (!proc.isAlive) throw java.io.IOException("движок не запущен")
+        w.write(s + "\n"); w.flush()
+    }
     private fun waitFor(t: String) {
         while (true) { val l = r.readLine() ?: error("движок остановился"); if (l.startsWith(t)) return }
     }
@@ -35,7 +38,7 @@ class Stockfish(ctx: Context) {
         send("position fen $fen"); send("go movetime $ms")
         val res = HashMap<Int, Line>(); var fired = false
         while (true) {
-            val l = r.readLine() ?: break
+            val l = r.readLine() ?: throw java.io.IOException("движок остановился")
             if (l.startsWith("bestmove")) break
             if (!l.startsWith("info") || " pv " !in l || " score " !in l) continue
             val t = l.split(" ")

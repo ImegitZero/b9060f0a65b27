@@ -178,10 +178,14 @@ class OverlayService : Service() {
             if (u == null || !same(u, g)) { unplausible = g; ui.postDelayed(go, 150); return }
         }
         unplausible = null
-        val turnWhite = when {
+        var turnWhite = when {
             prev == null -> if (rec.isStart(g)) true else manualWhite
             played != null -> !played.white
             else -> !lastTurnWhite
+        }
+        if (!Legality.valid(g, turnWhite)) {       // ход определён неверно или позиция распознана с ошибкой
+            if (Legality.valid(g, !turnWhite)) turnWhite = !turnWhite
+            else { ui.post { arrow.clear(); label.text = "Позиция не распознана" }; return }
         }
         val before = lastAnalysis
         lastGrid = g; lastTurnWhite = turnWhite; lastAnalysis = null
@@ -198,12 +202,24 @@ class OverlayService : Service() {
             ui.post { arrow.update(board, flipped, show, knight, played?.to, badge); label.text = text }
         }
 
-        val lines = engine().analyze(rec.fen(g, turnWhite), 500) { early ->
+        val lines = analyzeSafe(rec.fen(g, turnWhite)) { early ->
             if (!superseded) { lastAnalysis = early; render(early) }   // стрелка почти сразу
+        }
+        if (lines == null) {                       // движок упал и не поднялся — сбросим состояние и попробуем снова
+            lastGrid = null; ui.post { label.text = "Движок перезапущен…" }; ui.postDelayed(go, 700); return
         }
         if (lines.isEmpty()) { ui.post { arrow.clear(); label.text = "Партия окончена" }; return }
         lastAnalysis = lines
         if (!superseded) render(lines)                                  // уточнённая оценка
+    }
+
+    /** Если Stockfish умер — пересоздаём процесс и повторяем один раз. null — не получилось. */
+    private fun analyzeSafe(fen: String, early: (List<Line>) -> Unit): List<Line>? {
+        for (attempt in 0..1) {
+            try { val l = engine().analyze(fen, 500, early); errShown = false; return l }
+            catch (e: Exception) { runCatching { eng?.close() }; eng = null }
+        }
+        return null
     }
 
     private fun reset() = bg.execute {
