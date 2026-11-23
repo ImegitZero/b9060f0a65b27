@@ -212,7 +212,7 @@ class OverlayService : Service() {
     }
 
     private fun learn() {
-        val bmp = grab() ?: return say("Нет кадра")
+        val bmp = grab() ?: run { say("Нет кадра"); return }
         bg.execute {
             say(if (rec.learn(bmp, flipped)) "Фигуры запомнены ✔" else "Не нашёл доску: нужна стартовая позиция и зелёная тема")
             bmp.recycle()
