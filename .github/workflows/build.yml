@@ -20,7 +20,7 @@ jobs:
         run: |
           set +e
           for i in 1 2 3; do
-            gradle assembleDebug --console=plain --no-daemon > build.log 2>&1
+            gradle assembleDebug --console=plain --no-daemon --stacktrace > build.log 2>&1
             rc=$?
             [ $rc -eq 0 ] && break
             grep -q "429" build.log || break
@@ -29,6 +29,10 @@ jobs:
           if [ $rc -ne 0 ]; then
             m1=$(grep -E "^e: |error:|What went wrong|Execution failed|Could not|Unresolved" -A2 build.log | head -40 | sed ':a;N;$!ba;s/\n/%0A/g')
             echo "::error title=GRADLE-ERRORS::$m1"
+            m3=$(grep -E "Caused by|No space|Exception|IOException" build.log | head -15 | sed ':a;N;$!ba;s/\n/%0A/g')
+            echo "::error title=GRADLE-CAUSE::$m3"
+            df -h / | tail -1 | sed 's/^/::error title=GRADLE-DISK::/'
+            ls -la app/build/outputs/apk/debug 2>/dev/null | sed ':a;N;$!ba;s/\n/%0A/g' | sed 's/^/::error title=GRADLE-APK::/' 
             exit 1
           fi
       - name: Release
