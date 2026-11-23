@@ -7,6 +7,7 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Rect
+import android.graphics.drawable.GradientDrawable
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.Image
@@ -18,8 +19,8 @@ import android.os.IBinder
 import android.os.Looper
 import android.util.DisplayMetrics
 import android.view.Gravity
+import android.view.View
 import android.view.WindowManager
-import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
@@ -27,9 +28,9 @@ import java.util.concurrent.Executors
 import kotlin.math.abs
 
 /**
- * Работает по событиям: пока на доске ничего не меняется — не делает почти ничего.
- * Как только кадр в области доски изменился и устоялся (80 мс), распознаём позицию и считаем ход.
- * Стрелку не прячем: распознавание к ней устойчиво, поэтому мигания нет.
+ * Работает по событиям: пока на доске ничего не меняется — почти ничего не делает.
+ * Подсказка показывается только на твоём ходу. Состояние самовосстанавливается:
+ * если для текущей позиции нет результата — расчёт повторяется сам.
  */
 class OverlayService : Service() {
     private lateinit var wm: WindowManager
@@ -39,7 +40,9 @@ class OverlayService : Service() {
     private var held: Image? = null
     private lateinit var arrow: ArrowView
     private lateinit var panel: LinearLayout
-    private lateinit var label: TextView
+    private lateinit var menu: LinearLayout
+    private lateinit var evalChip: TextView
+    private lateinit var qualityView: TextView
     private lateinit var rec: BoardRecognizer
     @Volatile private var eng: Stockfish? = null
     private fun engine() = eng ?: Stockfish(this).also { eng = it }
@@ -47,10 +50,8 @@ class OverlayService : Service() {
     private val ui = Handler(Looper.getMainLooper())
 
     @Volatile private var running = true
-    @Volatile private var flipped = false     // true — чёрные внизу
-    @Volatile private var showBoth = false    // подсказка и на ходу соперника
-    @Volatile private var manualWhite = true  // чей ход, если вошли в партию с середины
-    @Volatile private var superseded = false  // пришла новая позиция — текущий расчёт не нужен
+    @Volatile private var flipped = false       // true — чёрные внизу (определяется автоматически)
+    @Volatile private var orientLocked = false  // true — ориентацию задал вручную кнопкой ⇅
     private var errShown = false
 
     // только поток UI
@@ -60,10 +61,14 @@ class OverlayService : Service() {
     private var sampleRect: Rect? = null
 
     // только поток bg
-    private var lastGrid: Array<CharArray>? = null
+    private var curGrid: Array<CharArray>? = null
+    private var curTurn = true                  // чей ход в curGrid
+    private var curPlayed: Played? = null       // ход, приведший к curGrid
+    private var curBefore: List<Line>? = null   // оценка позиции до этого хода
+    private var curAnalysis: List<Line>? = null
+    private var analyzed = false                // есть ли уже результат для curGrid
     private var unplausible: Array<CharArray>? = null
-    private var lastAnalysis: List<Line>? = null
-    private var lastTurnWhite = true
+    private val hist = ArrayList<Pair<Array<CharArray>, Boolean>>()   // для «Отменить ход»
     private var misses = 0
 
     override fun onBind(i: Intent?): IBinder? = null
@@ -137,7 +142,7 @@ class OverlayService : Service() {
 
     // ---------- запуск распознавания ----------
     private val go = Runnable { recognize() }
-    private fun kick() { ui.removeCallbacks(go); ui.postDelayed(go, 80) }   // ждём, пока анимация хода закончится
+    private fun kick() { ui.removeCallbacks(go); ui.postDelayed(go, 80) }   // ждём конца анимации хода
 
     private val tick = object : Runnable {   // страховка: раз в секунду проверяем, даже если событий не было
         override fun run() { if (running && !busy) recognize(); ui.postDelayed(this, 1000) }
@@ -145,108 +150,158 @@ class OverlayService : Service() {
 
     private fun recognize() {
         if (!running) return
-        if (busy) { dirty = true; superseded = true; runCatching { eng?.stop() }; return }
+        if (busy) { dirty = true; return }
         val bmp = grab() ?: return
         busy = true
         bg.execute {
             try { process(bmp) }
-            catch (e: Exception) { if (!errShown) { errShown = true; say("Ошибка: ${e.message} (есть ли libstockfish.so?)") } }
+            catch (e: Exception) { if (!errShown) { errShown = true; say("Ошибка: ${e.message}") } }
             finally { bmp.recycle(); ui.post { busy = false; if (dirty) { dirty = false; kick() } } }
         }
     }
 
+    // ---------- логика ----------
     private fun same(a: Array<CharArray>, b: Array<CharArray>) = a.contentDeepEquals(b)
+
+    /** Если белые фигуры «в среднем выше» чёрных — доска прочитана перевёрнутой. */
+    private fun whiteIsHigh(g: Array<CharArray>): Boolean {
+        var ws = 0; var wn = 0; var bs = 0; var bn = 0
+        for (rk in 0..7) for (f in 0..7) {
+            val c = g[rk][f]; if (c == '.') continue
+            if (c.isUpperCase()) { ws += rk; wn++ } else { bs += rk; bn++ }
+        }
+        return wn > 0 && bn > 0 && ws.toDouble() / wn > bs.toDouble() / bn + 1.0
+    }
+    private fun rotate(g: Array<CharArray>) = Array(8) { rk -> CharArray(8) { f -> g[7 - rk][7 - f] } }
+    private fun fixOrientation(g: Array<CharArray>): Array<CharArray> =
+        if (!orientLocked && whiteIsHigh(g)) { flipped = !flipped; rotate(g) } else g
 
     private fun fmt(cp: Int) = if (abs(cp) >= 9000) (if (cp > 0) "+" else "-") + "M" + (10000 - abs(cp))
                                else String.format("%+.1f", cp / 100.0)
 
     private fun process(bmp: Bitmap) {
-        superseded = false
-        if (!rec.learned) { ui.post { label.text = "Нажми 📚 на стартовой позиции" }; return }
-        val g = rec.grid(bmp, flipped)
+        if (!rec.learned) { setMsg("Нажми 📚 на стартовой позиции"); return }
+        var g = rec.grid(bmp, flipped)
         if (g == null) {
-            if (++misses == 3) { lastGrid = null; lastAnalysis = null; ui.post { arrow.clear(); label.text = "Доска не найдена" } }
+            if (++misses == 3) { curGrid = null; analyzed = false; hist.clear(); ui.post { arrow.clear() }; setMsg("Доска не найдена") }
             return
         }
         misses = 0
-        val prev = lastGrid
-        if (prev != null && same(prev, g)) { unplausible = null; return }
+        val cur = curGrid
+        if (cur == null) g = fixOrientation(g)
 
-        val played = if (prev != null) MoveClassifier.diff(prev, g) else null
-        if (prev != null && played == null) {   // не похоже на один ход — подтверждаем повторным кадром
-            val u = unplausible
-            if (u == null || !same(u, g)) { unplausible = g; ui.postDelayed(go, 150); return }
-        }
-        unplausible = null
-        var turnWhite = when {
-            prev == null -> if (rec.isStart(g)) true else manualWhite
-            played != null -> !played.white
-            else -> !lastTurnWhite
-        }
-        if (!Legality.valid(g, turnWhite)) {       // ход определён неверно или позиция распознана с ошибкой
-            if (Legality.valid(g, !turnWhite)) turnWhite = !turnWhite
-            else { ui.post { arrow.clear(); label.text = "Позиция не распознана" }; return }
-        }
-        val before = lastAnalysis
-        lastGrid = g; lastTurnWhite = turnWhite; lastAnalysis = null
+        if (cur == null || !same(cur, g)) {
+            val start = rec.isStart(g)
+            var played: Played? = null
+            var before: List<Line>? = null
+            var turn: Boolean
+            val take = if (cur != null && !start) hist.indexOfLast { same(it.first, g) } else -1
+            if (take >= 0) {                                   // «Отменить ход» — возвращаемся к прошлой позиции
+                turn = hist[take].second
+                hist.subList(take + 1, hist.size).clear()
+            } else {
+                played = if (cur != null && !start) MoveClassifier.diff(cur, g) else null
+                if (cur != null && !start && played == null) { // не один ход — подтверждаем повторным кадром
+                    val u = unplausible
+                    if (u == null || !same(u, g)) { unplausible = g; ui.postDelayed(go, 150); return }
+                }
+                if (played != null) {
+                    turn = !played.white
+                    if (played.white == curTurn) before = curAnalysis
+                } else {                                        // новая партия, вход с середины или «пересинхронизация»
+                    g = fixOrientation(g)
+                    turn = if (rec.isStart(g)) true else !flipped   // неизвестно чей ход — считаем, что твой
+                    hist.clear()
+                }
+                hist.add(Pair(g, turn)); if (hist.size > 12) hist.removeAt(0)
+            }
+            if (!Legality.valid(g, turn)) {
+                if (Legality.valid(g, !turn)) turn = !turn
+                else { ui.post { arrow.clear() }; setMsg("Позиция не распознана"); return }
+            }
+            unplausible = null
+            curGrid = g; curTurn = turn; curPlayed = played; curBefore = before; curAnalysis = null; analyzed = false
+            if (hist.isNotEmpty()) hist[hist.size - 1] = Pair(g, turn)
+        } else {
+            unplausible = null
+            if (analyzed) return        // всё актуально
+        }                               // иначе: позиция та же, но результата нет — считаем ещё раз (самовосстановление)
+
+        val grid = curGrid ?: return
+        val turnW = curTurn; val pl = curPlayed; val bef = curBefore
         val board = rec.board ?: return
-        if (superseded) return
 
         fun render(lines: List<Line>) {
-            val badge = if (played != null && !before.isNullOrEmpty()) MoveClassifier.classify(played, g, before, lines) else null
+            val badge = if (pl != null && !bef.isNullOrEmpty()) MoveClassifier.classify(pl, grid, bef, lines) else null
             val mv = lines[0].pv.firstOrNull()
-            val show = if (turnWhite == !flipped || showBoth) mv else null
-            val knight = show != null && g[show[1] - '1'][show[0] - 'a'].uppercaseChar() == 'N'
-            val who = if (played == null) "" else if (played.white == !flipped) "Твой ход: " else "Соперник: "
-            val text = fmt(if (turnWhite) lines[0].cp else -lines[0].cp) + (badge?.let { "  •  $who${it.ru}" } ?: "")
-            ui.post { arrow.update(board, flipped, show, knight, played?.to, badge); label.text = text }
+            val fl = flipped
+            val show = if (turnW == !fl) mv else null           // подсказка — только на твоём ходу
+            val knight = show != null && grid[show[1] - '1'][show[0] - 'a'].uppercaseChar() == 'N'
+            val cpW = if (turnW) lines[0].cp else -lines[0].cp
+            val who = if (pl == null) "" else if (pl.white == !fl) "Ты: " else "Соперник: "
+            val win = MoveClassifier.win(cpW).toFloat()
+            ui.post {
+                arrow.update(board, fl, show, knight, pl?.to, badge, win)
+                setStatus(fmt(cpW), cpW >= 0, badge?.let { who + it.ru }, badge?.color)
+            }
         }
 
-        val lines = analyzeSafe(rec.fen(g, turnWhite)) { early ->
-            if (!superseded) { lastAnalysis = early; render(early) }   // стрелка почти сразу
+        val lines = analyzeSafe(rec.fen(grid, turnW)) { early -> curAnalysis = early; analyzed = true; render(early) }
+        if (lines == null) {                                    // движок не поднялся — сбросим и попробуем снова
+            curGrid = null; hist.clear(); setMsg("Движок перезапускается…"); ui.postDelayed(go, 700); return
         }
-        if (lines == null) {                       // движок упал и не поднялся — сбросим состояние и попробуем снова
-            lastGrid = null; ui.post { label.text = "Движок перезапущен…" }; ui.postDelayed(go, 700); return
-        }
-        if (lines.isEmpty()) { ui.post { arrow.clear(); label.text = "Партия окончена" }; return }
-        lastAnalysis = lines
-        if (!superseded) render(lines)                                  // уточнённая оценка
+        if (lines.isEmpty()) { analyzed = true; ui.post { arrow.clear() }; setMsg("Партия окончена"); return }
+        curAnalysis = lines; analyzed = true
+        render(lines)
     }
 
     /** Если Stockfish умер — пересоздаём процесс и повторяем один раз. null — не получилось. */
     private fun analyzeSafe(fen: String, early: (List<Line>) -> Unit): List<Line>? {
         for (attempt in 0..1) {
-            try { val l = engine().analyze(fen, 500, early); errShown = false; return l }
+            try { val l = engine().analyze(fen, 400, early); errShown = false; return l }
             catch (e: Exception) { runCatching { eng?.close() }; eng = null }
         }
         return null
     }
 
     private fun reset() = bg.execute {
-        lastGrid = null; unplausible = null; lastAnalysis = null
+        curGrid = null; hist.clear(); unplausible = null; analyzed = false
         ui.post { kick() }
     }
 
     private fun learn() {
         val bmp = grab() ?: run { say("Нет кадра"); return }
         bg.execute {
+            rec.whiteAtBottom(bmp)?.let { flipped = !it }
+            orientLocked = false
             say(if (rec.learn(bmp, flipped)) "Фигуры запомнены ✔" else "Не нашёл доску: нужна стартовая позиция и зелёная тема")
             bmp.recycle()
-            lastGrid = null; unplausible = null; lastAnalysis = null
+            curGrid = null; hist.clear(); unplausible = null; analyzed = false
             ui.post { kick() }
         }
     }
 
     // ---------- интерфейс ----------
-    private fun say(s: String) = ui.post { Toast.makeText(this, s, Toast.LENGTH_LONG).show() }
+    private fun say(s: String) { ui.post { Toast.makeText(this, s, Toast.LENGTH_LONG).show() } }
+    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
-    private fun btn(t: String, a: (Button) -> Unit): Button {
-        val d = resources.displayMetrics.density
-        return Button(this).apply {
-            text = t; textSize = 12f; minWidth = 0; minimumWidth = 0; setPadding(0, 0, 0, 0)
-            layoutParams = LinearLayout.LayoutParams((46 * d).toInt(), (46 * d).toInt())
-            setOnClickListener { a(this) }
-        }
+    private fun setMsg(t: String) {
+        ui.post { evalChip.visibility = View.GONE; qualityView.text = t; qualityView.setTextColor(Color.WHITE) }
+    }
+
+    private fun setStatus(eval: String, whiteAhead: Boolean, quality: String?, color: Int?) {
+        evalChip.visibility = View.VISIBLE; evalChip.text = eval
+        evalChip.setTextColor(if (whiteAhead) Color.BLACK else Color.WHITE)
+        (evalChip.background as GradientDrawable).setColor(if (whiteAhead) 0xFFF0F0F0.toInt() else 0xFF2B2B2B.toInt())
+        qualityView.text = quality ?: ""
+        qualityView.setTextColor(color ?: Color.WHITE)
+    }
+
+    private fun icon(t: String, a: (TextView) -> Unit) = TextView(this).apply {
+        text = t; textSize = 16f; gravity = Gravity.CENTER; setTextColor(Color.WHITE)
+        background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0x33FFFFFF) }
+        layoutParams = LinearLayout.LayoutParams(dp(38), dp(38)).apply { setMargins(dp(3), dp(3), dp(3), dp(3)) }
+        setOnClickListener { a(this) }
     }
 
     private fun setupOverlay() {
@@ -256,21 +311,35 @@ class OverlayService : Service() {
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT))
 
-        val row = LinearLayout(this)
-        row.addView(btn("⏸") { b -> running = !running; b.text = if (running) "⏸" else "▶"; if (running) kick() else arrow.clear() })
-        row.addView(btn("📚") { learn() })
-        row.addView(btn("⚪") { b -> manualWhite = !manualWhite; b.text = if (manualWhite) "⚪" else "⚫"; reset() })
-        row.addView(btn("W↓") { b -> flipped = !flipped; b.text = if (flipped) "B↓" else "W↓"; arrow.clear(); reset() })
-        row.addView(btn("👁") { b -> showBoth = !showBoth; b.text = if (showBoth) "👁2" else "👁"; reset() })
-        row.addView(btn("✕") { stopSelf() })
-        label = TextView(this).apply {
-            setTextColor(Color.WHITE); setBackgroundColor(0xAA000000.toInt()); textSize = 13f
-            setPadding(16, 6, 16, 6); text = "ChessHint"
+        evalChip = TextView(this).apply {
+            textSize = 14f; typeface = android.graphics.Typeface.DEFAULT_BOLD; visibility = View.GONE
+            setPadding(dp(9), dp(3), dp(9), dp(3))
+            background = GradientDrawable().apply { cornerRadius = dp(10).toFloat() }
+            layoutParams = LinearLayout.LayoutParams(-2, -2).apply { setMargins(dp(4), 0, dp(6), 0) }
         }
-        panel = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; alpha = 0.9f; addView(row); addView(label) }
+        qualityView = TextView(this).apply {
+            textSize = 13f; typeface = android.graphics.Typeface.DEFAULT_BOLD; setTextColor(Color.WHITE)
+            text = "ChessHint"; setPadding(dp(4), 0, dp(8), 0)
+        }
+        menu = LinearLayout(this).apply {
+            addView(icon("⏸") { t -> running = !running; t.text = if (running) "⏸" else "▶"; if (running) kick() else arrow.clear() })
+            addView(icon("📚") { learn() })
+            addView(icon("⇅") { flipped = !flipped; orientLocked = true; arrow.clear(); reset() })
+            addView(icon("✕") { stopSelf() })
+        }
+        val head = LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            addView(icon("♟") { menu.visibility = if (menu.visibility == View.VISIBLE) View.GONE else View.VISIBLE })
+            addView(evalChip); addView(qualityView)
+        }
+        panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; setPadding(dp(4), dp(2), dp(4), dp(2))
+            background = GradientDrawable().apply { setColor(0xD9141618.toInt()); cornerRadius = dp(22).toFloat() }
+            addView(head); addView(menu)
+        }
         wm.addView(panel, WindowManager.LayoutParams(-2, -2, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT)
-            .apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; y = 30 })
+            .apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; y = dp(8) })
     }
 
     override fun onDestroy() {

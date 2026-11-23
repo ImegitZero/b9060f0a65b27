@@ -113,6 +113,17 @@ class BoardRecognizer(private val prefs: SharedPreferences) {
 
     fun isStart(g: Array<CharArray>) = (0..7).all { rk -> (0..7).all { f -> g[rk][f] == (startPiece(f, rk) ?: '.') } }
 
+    /** На стартовой позиции: белые фигуры внизу? (по яркости фигур в нижних и верхних рядах) */
+    fun whiteAtBottom(b: Bitmap): Boolean? {
+        val r = locate(b) ?: return null
+        fun avg(rows: IntRange): Double {
+            var sum = 0L; var n = 0
+            for (row in rows) for (col in 0..7) for (v in sig(b, r, row, col)) if (v != 128) { sum += v; n++ }
+            return if (n == 0) 0.0 else sum.toDouble() / n
+        }
+        return avg(6..7) > avg(0..1)
+    }
+
     fun learn(b: Bitmap, flipped: Boolean): Boolean {
         val r = locate(b) ?: return false
         tpl.clear()
