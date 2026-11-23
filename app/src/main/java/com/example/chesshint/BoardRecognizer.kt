@@ -12,7 +12,7 @@ import kotlin.math.abs
  * Шаблоны фигур запоминаются один раз со стартовой позиции и сохраняются на диск.
  */
 class BoardRecognizer(private val prefs: SharedPreferences) {
-    var board: Rect? = null
+    @Volatile var board: Rect? = null
     private val N = 24
     private val pieces = "PNBRQKpnbrqk"
     private val tpl = HashMap<Char, MutableList<IntArray>>()
@@ -46,6 +46,20 @@ class BoardRecognizer(private val prefs: SharedPreferences) {
         }
         if (s >= 0 && p - s > bl) { bs = s; be = p }
         return if (bs < 0) null else intArrayOf(bs, be)
+    }
+
+    /** Быстрый путь: если доска на прежнем месте — не сканируем весь экран. */
+    fun boardFor(b: Bitmap): Rect? {
+        val r = board
+        if (r != null && stillThere(b, r)) return r
+        return locate(b)
+    }
+
+    private fun stillThere(b: Bitmap, r: Rect): Boolean {
+        if (r.right > b.width || r.bottom > b.height || r.top < 5 || r.bottom + 5 >= b.height) return false
+        val pts = listOf(r.left + 4 to r.top + 4, r.right - 5 to r.top + 4, r.left + 4 to r.bottom - 5, r.right - 5 to r.bottom - 5)
+        if (pts.count { isBoardColor(b.getPixel(it.first, it.second)) } < 2) return false
+        return !isBoardColor(b.getPixel(r.left + 4, r.top - 4)) && !isBoardColor(b.getPixel(r.left + 4, r.bottom + 3))
     }
 
     /** Ищем доску по плотности «шахматных» цветов, поэтому лицо бота, логотип и т.п. не мешают. */
@@ -114,7 +128,7 @@ class BoardRecognizer(private val prefs: SharedPreferences) {
     /** g[горизонталь][файл], '.' — пусто. null — доска не найдена / позиция неправдоподобна. */
     fun grid(b: Bitmap, flipped: Boolean): Array<CharArray>? {
         if (!learned) return null
-        val r = locate(b) ?: return null
+        val r = boardFor(b) ?: return null
         val g = Array(8) { CharArray(8) { '.' } }
         for (row in 0..7) for (col in 0..7) {
             val (f, rk) = fr(row, col, flipped)

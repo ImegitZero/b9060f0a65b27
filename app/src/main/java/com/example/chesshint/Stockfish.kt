@@ -14,29 +14,37 @@ class Stockfish(ctx: Context) {
 
     init {
         send("uci"); waitFor("uciok")
-        send("setoption name MultiPV value 2"); send("setoption name Threads value 2"); send("setoption name Hash value 64")
+        send("setoption name MultiPV value 2"); send("setoption name Threads value 3"); send("setoption name Hash value 64")
         send("isready"); waitFor("readyok")
     }
 
-    private fun send(s: String) { w.write(s + "\n"); w.flush() }
+    private fun send(s: String) = synchronized(w) { w.write(s + "\n"); w.flush() }
     private fun waitFor(t: String) {
         while (true) { val l = r.readLine() ?: error("движок остановился"); if (l.startsWith(t)) return }
     }
 
-    /** Две лучшие линии. Пустой список — ходов нет (мат/пат). */
+    /** Прервать текущий расчёт (вернёт то, что успел). */
+    fun stop() = send("stop")
+
+    /**
+     * Две лучшие линии. early вызывается один раз, как только достигнута глубина 10 — это почти мгновенно.
+     * Пустой список — ходов нет (мат/пат).
+     */
     @Synchronized
-    fun analyze(fen: String, ms: Int): List<Line> {
+    fun analyze(fen: String, ms: Int, early: ((List<Line>) -> Unit)? = null): List<Line> {
         send("position fen $fen"); send("go movetime $ms")
-        val res = HashMap<Int, Line>()
+        val res = HashMap<Int, Line>(); var fired = false
         while (true) {
             val l = r.readLine() ?: break
             if (l.startsWith("bestmove")) break
             if (!l.startsWith("info") || " pv " !in l || " score " !in l) continue
             val t = l.split(" ")
             val mi = t.indexOf("multipv").let { if (it >= 0) t[it + 1].toInt() else 1 }
+            val depth = t.indexOf("depth").let { if (it >= 0) t[it + 1].toInt() else 0 }
             val si = t.indexOf("score"); val v = t[si + 2].toInt()
             val cp = if (t[si + 1] == "mate") (if (v > 0) 10000 - v else -10000 - v) else v
             res[mi] = Line(cp, t.subList(t.indexOf("pv") + 1, t.size))
+            if (!fired && early != null && mi == 2 && depth >= 10) { fired = true; early(res.toSortedMap().values.toList()) }
         }
         return res.toSortedMap().values.toList()
     }

@@ -43,6 +43,9 @@ class ArrowView(c: Context) : View(c) {
 
     override fun onDraw(c: Canvas) {
         val r = rect ?: return; val cell = r.width() / 8f
+        // окно оверлея может начинаться ниже верха экрана (строка состояния) — компенсируем сдвиг
+        val loc = IntArray(2); getLocationOnScreen(loc)
+        c.translate(-loc[0].toFloat(), -loc[1].toFloat())
         move?.let { mv ->
             val a = ctr(mv.substring(0, 2)); val b = ctr(mv.substring(2, 4))
             // конь ходит буквой «Г»: сначала по длинной стороне, потом поворот
