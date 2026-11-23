@@ -181,12 +181,13 @@ class OverlayService : Service() {
 
     private fun process(bmp: Bitmap) {
         if (!rec.learned) { setMsg("Нажми 📚 на стартовой позиции"); return }
-        var g = rec.grid(bmp, flipped)
-        if (g == null) {
+        val raw = rec.grid(bmp, flipped)
+        if (raw == null) {
             if (++misses == 3) { curGrid = null; analyzed = false; hist.clear(); ui.post { arrow.clear() }; setMsg("Доска не найдена") }
             return
         }
         misses = 0
+        var g: Array<CharArray> = raw
         val cur = curGrid
         if (cur == null) g = fixOrientation(g)
 

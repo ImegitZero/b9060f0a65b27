@@ -65,8 +65,8 @@ class ArrowView(c: Context) : View(c) {
         move?.let { mv ->
             val a = ctr(mv.substring(0, 2)); val b = ctr(mv.substring(2, 4))
             val h = cell / 2
-            sq.color = 0x552E7DFF; c.drawRect(a.x - h, a.y - h, a.x + h, a.y + h, sq)
-            sq.color = 0x882E7DFF; c.drawRect(b.x - h, b.y - h, b.x + h, b.y + h, sq)
+            sq.color = 0x552E7DFF.toInt(); c.drawRect(a.x - h, a.y - h, a.x + h, a.y + h, sq)
+            sq.color = 0x882E7DFF.toInt(); c.drawRect(b.x - h, b.y - h, b.x + h, b.y + h, sq)
             // конь ходит буквой «Г»: сначала по длинной стороне, потом поворот
             val pts = if (knight) listOf(a, if (abs(b.x - a.x) > abs(b.y - a.y)) PointF(b.x, a.y) else PointF(a.x, b.y), b)
                       else listOf(a, b)
